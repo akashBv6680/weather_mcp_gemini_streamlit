@@ -20,7 +20,7 @@ If tool results are available, ground your answer in them.
 Keep answers crisp, useful, and action-oriented.
 """.strip()
 
-MODEL_NAME = "gemini-2.0-flash"
+MODEL_NAME = "gemini-2.5-flash"
 USER_AGENT = "weather-mcp-streamlit/1.0"
 
 
