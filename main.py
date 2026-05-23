@@ -9,53 +9,58 @@ from google import genai
 from google.genai import types
 from langgraph.graph import StateGraph, END
 
-# ----------------------------------------------------------------
+# ------------------------------------------------------------
 # CONFIG
-# ----------------------------------------------------------------
+# ------------------------------------------------------------
 
 SYSTEM_PROMPT = """
-You are a practical weather assistant inside a Streamlit dashboard.
-Use available tools whenever the user asks for live weather, forecast,
-alerts, coordinates, or city comparisons. If tool results are available,
-ground your answer in them. Keep answers crisp, useful, and action-oriented.
+You are a practical weather assistant in a Streamlit dashboard.
+Use the available weather tools whenever the user asks for
+live weather, forecast, rain chances, wind, or city comparisons.
+
+Always:
+- Call tools first when weather data is needed.
+- Ground your final answer in the tool results.
+- Give concise, action-oriented explanations for a normal user.
 """.strip()
 
 MODEL_NAME = "gemini-2.5-flash"
 USER_AGENT = "weather-mcp-streamlit/1.0"
 
 
-# ----------------------------------------------------------------
-# API KEY
-# ----------------------------------------------------------------
+# ------------------------------------------------------------
+# GEMINI API KEY HANDLING
+# ------------------------------------------------------------
 
 def ensure_api_key() -> str:
-    # 1) Prefer Streamlit secrets in Cloud
+    # Prefer Streamlit secrets in Cloud
     api_key = st.secrets.get("GEMINI_API_KEY", None)
 
-    # 2) Fallback to environment variable (local dev)
+    # Fallback to environment variable (local dev)
     if not api_key:
         api_key = os.getenv("GEMINI_API_KEY", "")
 
-    # 3) Allow override in sidebar
+    # Allow override from sidebar
     api_key = st.sidebar.text_input(
         "Gemini API Key (optional override)",
         type="password",
         value=api_key,
-        help="In Streamlit Cloud, put GEMINI_API_KEY in Secrets.",
+        help="In Streamlit Cloud, add GEMINI_API_KEY in Secrets.",
     )
 
     if not api_key:
-        st.warning("Set GEMINI_API_KEY in Streamlit secrets or here in the sidebar.")
+        st.warning("Please set GEMINI_API_KEY in Secrets or here in the sidebar.")
         st.stop()
 
     return api_key
 
 
-# ----------------------------------------------------------------
-# WEATHER FUNCTIONS (in-process, no separate server)
-# ----------------------------------------------------------------
+# ------------------------------------------------------------
+# WEATHER FUNCTIONS (IN-PROCESS, NO MCP SERVER)
+# ------------------------------------------------------------
 
 async def geocode_city(city: str) -> Dict[str, Any]:
+    """Convert city name to coordinates via Open-Meteo Geocoding API."""
     url = "https://geocoding-api.open-meteo.com/v1/search"
     params = {"name": city, "count": 1, "language": "en", "format": "json"}
     headers = {"User-Agent": USER_AGENT}
@@ -160,18 +165,18 @@ TOOL_REGISTRY = {
     "compare_weather": compare_weather,
 }
 
-# Gemini function declarations
+# Gemini function declarations (tool schema)
 TOOL_DECLARATIONS = [
     types.FunctionDeclaration(
         name="get_current_weather",
         description=(
             "Get live current weather for a city: temperature, "
-            "humidity, wind, precipitation."
+            "humidity, wind, precipitation, cloud cover."
         ),
         parameters={
             "type": "object",
             "properties": {
-                "city": {"type": "string", "description": "City name e.g. Chennai"}
+                "city": {"type": "string", "description": "City name, e.g. Chennai"},
             },
             "required": ["city"],
         },
@@ -206,9 +211,9 @@ TOOL_DECLARATIONS = [
 ]
 
 
-# ----------------------------------------------------------------
+# ------------------------------------------------------------
 # GEMINI AGENT
-# ----------------------------------------------------------------
+# ------------------------------------------------------------
 
 class GeminiWeatherAgent:
     def __init__(self, api_key: str):
@@ -244,12 +249,15 @@ class GeminiWeatherAgent:
                 p.function_call for p in parts if getattr(p, "function_call", None)
             ]
 
+            # If no tools requested, return final answer
             if not function_calls:
                 final_text = response.text or "No response generated."
                 return {"answer": final_text, "trace": trace}
 
+            # Add model message so far
             contents.append(candidate.content)
 
+            # Execute tools
             function_response_parts = []
             for fc in function_calls:
                 args = dict(fc.args) if fc.args else {}
@@ -259,7 +267,7 @@ class GeminiWeatherAgent:
                     try:
                         tool_text = await tool_fn(**args)
                     except Exception as e:
-                        tool_text = f"Error: {str(e)}"
+                        tool_text = f"Error calling {fc.name}: {str(e)}"
                 else:
                     tool_text = f"Unknown tool: {fc.name}"
 
@@ -272,19 +280,17 @@ class GeminiWeatherAgent:
                     )
                 )
 
+            # Send tool results back to Gemini
             contents.append(
                 types.Content(role="tool", parts=function_response_parts)
             )
 
-        return {
-            "answer": "Reached the tool-call limit.",
-            "trace": trace,
-        }
+        return {"answer": "Reached tool-call limit.", "trace": trace}
 
 
-# ----------------------------------------------------------------
-# LANGGRAPH
-# ----------------------------------------------------------------
+# ------------------------------------------------------------
+# LANGGRAPH SETUP
+# ------------------------------------------------------------
 
 class AgentState(TypedDict):
     user_input: str
@@ -310,9 +316,9 @@ def build_langgraph(agent: GeminiWeatherAgent):
     return graph.compile()
 
 
-# ----------------------------------------------------------------
+# ------------------------------------------------------------
 # STREAMLIT HELPERS
-# ----------------------------------------------------------------
+# ------------------------------------------------------------
 
 @st.cache_resource(show_spinner=False)
 def get_loop():
@@ -327,7 +333,6 @@ def bootstrap_agent(api_key: str):
         agent = GeminiWeatherAgent(api_key)
         st.session_state.agent = agent
         st.session_state.graph = build_langgraph(agent)
-
     return st.session_state.agent, loop, st.session_state.graph
 
 
@@ -337,23 +342,17 @@ def render_sidebar():
     st.sidebar.caption(f"Model: {MODEL_NAME}")
 
     st.sidebar.subheader("Available Tools")
-    st.sidebar.markdown(
-        "- **get_current_weather** — Live weather for any city"
-    )
-    st.sidebar.markdown(
-        "- **get_forecast** — Up to 7-day daily forecast"
-    )
-    st.sidebar.markdown(
-        "- **compare_weather** — Side-by-side city comparison"
-    )
+    st.sidebar.markdown("- **get_current_weather** — Live weather for any city")
+    st.sidebar.markdown("- **get_forecast** — Up to 7-day daily forecast")
+    st.sidebar.markdown("- **compare_weather** — Side-by-side city comparison")
     st.sidebar.markdown("---")
     st.sidebar.caption("Weather data: Open-Meteo (free, no key needed)")
     st.sidebar.caption("LangGraph orchestrates the agent loop")
 
 
-# ----------------------------------------------------------------
-# MAIN APP
-# ----------------------------------------------------------------
+# ------------------------------------------------------------
+# MAIN STREAMLIT APP
+# ------------------------------------------------------------
 
 def main():
     st.set_page_config(
@@ -364,9 +363,9 @@ def main():
 
     st.title("🌦️ Weather MCP Dashboard — Gemini + LangGraph")
     st.caption(
-        "Gemini reasons with weather tools via function calling. "
-        "LangGraph orchestrates the agent loop. "
-        "Streamlit shows the full tool execution trace."
+        "Gemini 2.5 Flash uses weather tools (Open-Meteo) via function calling. "
+        "LangGraph coordinates the reasoning loop and tools. "
+        "Streamlit shows the final answer and tool execution trace."
     )
 
     api_key = ensure_api_key()
@@ -381,24 +380,21 @@ def main():
             "Type your weather task below:",
             height=130,
             value=(
-                "Give me current weather in Chennai and "
-                "a short practical summary."
+                "Give me current weather in Chennai "
+                "and a short practical summary."
             ),
         )
-        run = st.button(
-            "Run weather task",
-            use_container_width=True,
-            type="primary",
-        )
+        run = st.button("Run weather task", use_container_width=True, type="primary")
 
-        st.markdown("**Try these high-potential tasks:**")
-        for item in [
+        st.markdown("**Try these examples:**")
+        examples = [
             "Current weather in Chennai with humidity and wind.",
             "3-day forecast for Madurai with clothing advice.",
             "Compare Chennai and Coimbatore weather today.",
             "Weather in Bengaluru with a travel recommendation.",
             "5-day forecast for Delhi — should I carry an umbrella?",
-        ]:
+        ]
+        for item in examples:
             st.markdown(f"- {item}")
 
     with col2:
@@ -425,10 +421,7 @@ def main():
                 st.info("No tools were called for this request.")
             for i, step in enumerate(result_state["trace"], start=1):
                 with st.expander(f"Step {i} — {step['tool']}", expanded=True):
-                    st.code(
-                        json.dumps(step["args"], indent=2),
-                        language="json",
-                    )
+                    st.code(json.dumps(step["args"], indent=2), language="json")
                     st.text_area(
                         "Tool result",
                         value=step["result"],
@@ -437,14 +430,14 @@ def main():
                     )
 
     st.divider()
-    st.subheader("What this project gives you")
+    st.subheader("What this project demonstrates")
     st.markdown(
         """
-- **Gemini 2.5 Flash** function calling with weather tools  
-- **LangGraph** agent node orchestrating the reasoning loop  
-- **In-process weather tools** using Open-Meteo (free, no API key)  
-- **Streamlit Cloud ready** — just add GEMINI_API_KEY in Secrets  
-- Full **tool execution trace**
+- Gemini 2.5 Flash function calling with weather tools  
+- LangGraph agent orchestration in a single node  
+- Open-Meteo APIs for live weather and forecast (no key)  
+- Streamlit Cloud–friendly single-file deployment  
+- Full visibility into tool calls and results
         """
     )
 
