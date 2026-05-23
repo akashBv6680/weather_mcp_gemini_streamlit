@@ -12,12 +12,12 @@ from langgraph.graph import StateGraph, END
 # ----------------------------------------------------------------
 # CONFIG
 # ----------------------------------------------------------------
+
 SYSTEM_PROMPT = """
 You are a practical weather assistant inside a Streamlit dashboard.
-Use available tools whenever the user asks for live weather,
-forecast, alerts, coordinates, or city comparisons.
-If tool results are available, ground your answer in them.
-Keep answers crisp, useful, and action-oriented.
+Use available tools whenever the user asks for live weather, forecast,
+alerts, coordinates, or city comparisons. If tool results are available,
+ground your answer in them. Keep answers crisp, useful, and action-oriented.
 """.strip()
 
 MODEL_NAME = "gemini-2.5-flash"
@@ -27,11 +27,16 @@ USER_AGENT = "weather-mcp-streamlit/1.0"
 # ----------------------------------------------------------------
 # API KEY
 # ----------------------------------------------------------------
+
 def ensure_api_key() -> str:
+    # 1) Prefer Streamlit secrets in Cloud
     api_key = st.secrets.get("GEMINI_API_KEY", None)
+
+    # 2) Fallback to environment variable (local dev)
     if not api_key:
         api_key = os.getenv("GEMINI_API_KEY", "")
 
+    # 3) Allow override in sidebar
     api_key = st.sidebar.text_input(
         "Gemini API Key (optional override)",
         type="password",
@@ -42,23 +47,28 @@ def ensure_api_key() -> str:
     if not api_key:
         st.warning("Set GEMINI_API_KEY in Streamlit secrets or here in the sidebar.")
         st.stop()
+
     return api_key
 
 
 # ----------------------------------------------------------------
-# WEATHER FUNCTIONS (in-process, no subprocess)
+# WEATHER FUNCTIONS (in-process, no separate server)
 # ----------------------------------------------------------------
+
 async def geocode_city(city: str) -> Dict[str, Any]:
     url = "https://geocoding-api.open-meteo.com/v1/search"
     params = {"name": city, "count": 1, "language": "en", "format": "json"}
     headers = {"User-Agent": USER_AGENT}
+
     async with httpx.AsyncClient(timeout=20.0, headers=headers) as client:
         r = await client.get(url, params=params)
         r.raise_for_status()
         data = r.json()
+
     results = data.get("results", [])
     if not results:
         raise ValueError(f"City not found: {city}")
+
     item = results[0]
     return {
         "name": item.get("name"),
@@ -82,10 +92,12 @@ async def get_current_weather(city: str) -> str:
         "timezone": "auto",
     }
     headers = {"User-Agent": USER_AGENT}
+
     async with httpx.AsyncClient(timeout=20.0, headers=headers) as client:
         r = await client.get(url, params=params)
         r.raise_for_status()
         data = r.json()
+
     c = data.get("current", {})
     return (
         f"Current weather for {loc['name']}, {loc['country']}: "
@@ -115,10 +127,12 @@ async def get_forecast(city: str, days: int = 3) -> str:
         "timezone": "auto",
     }
     headers = {"User-Agent": USER_AGENT}
+
     async with httpx.AsyncClient(timeout=20.0, headers=headers) as client:
         r = await client.get(url, params=params)
         r.raise_for_status()
         data = r.json()
+
     daily = data.get("daily", {})
     lines = [f"Forecast for {loc['name']}, {loc['country']} ({days} days):"]
     for i in range(len(daily.get("time", []))):
@@ -129,6 +143,7 @@ async def get_forecast(city: str, days: int = 3) -> str:
             f"rain {daily['precipitation_sum'][i]} mm, "
             f"wind {daily['wind_speed_10m_max'][i]} km/h"
         )
+
     return "\n".join(lines)
 
 
@@ -149,7 +164,10 @@ TOOL_REGISTRY = {
 TOOL_DECLARATIONS = [
     types.FunctionDeclaration(
         name="get_current_weather",
-        description="Get live current weather for a city: temperature, humidity, wind, precipitation.",
+        description=(
+            "Get live current weather for a city: temperature, "
+            "humidity, wind, precipitation."
+        ),
         parameters={
             "type": "object",
             "properties": {
@@ -165,7 +183,10 @@ TOOL_DECLARATIONS = [
             "type": "object",
             "properties": {
                 "city": {"type": "string", "description": "City name"},
-                "days": {"type": "integer", "description": "Number of days 1 to 7, default 3"},
+                "days": {
+                    "type": "integer",
+                    "description": "Number of days 1 to 7, default 3",
+                },
             },
             "required": ["city"],
         },
@@ -188,6 +209,7 @@ TOOL_DECLARATIONS = [
 # ----------------------------------------------------------------
 # GEMINI AGENT
 # ----------------------------------------------------------------
+
 class GeminiWeatherAgent:
     def __init__(self, api_key: str):
         self.client = genai.Client(api_key=api_key)
@@ -203,6 +225,7 @@ class GeminiWeatherAgent:
                 ],
             )
         ]
+
         trace: List[Dict[str, Any]] = []
 
         for _ in range(6):
@@ -218,9 +241,7 @@ class GeminiWeatherAgent:
             candidate = response.candidates[0]
             parts = candidate.content.parts
             function_calls = [
-                p.function_call
-                for p in parts
-                if getattr(p, "function_call", None)
+                p.function_call for p in parts if getattr(p, "function_call", None)
             ]
 
             if not function_calls:
@@ -233,6 +254,7 @@ class GeminiWeatherAgent:
             for fc in function_calls:
                 args = dict(fc.args) if fc.args else {}
                 tool_fn = TOOL_REGISTRY.get(fc.name)
+
                 if tool_fn:
                     try:
                         tool_text = await tool_fn(**args)
@@ -242,6 +264,7 @@ class GeminiWeatherAgent:
                     tool_text = f"Unknown tool: {fc.name}"
 
                 trace.append({"tool": fc.name, "args": args, "result": tool_text})
+
                 function_response_parts.append(
                     types.Part.from_function_response(
                         name=fc.name,
@@ -262,6 +285,7 @@ class GeminiWeatherAgent:
 # ----------------------------------------------------------------
 # LANGGRAPH
 # ----------------------------------------------------------------
+
 class AgentState(TypedDict):
     user_input: str
     answer: str
@@ -282,12 +306,14 @@ def build_langgraph(agent: GeminiWeatherAgent):
     graph.add_node("weather_agent", weather_node)
     graph.set_entry_point("weather_agent")
     graph.add_edge("weather_agent", END)
+
     return graph.compile()
 
 
 # ----------------------------------------------------------------
 # STREAMLIT HELPERS
 # ----------------------------------------------------------------
+
 @st.cache_resource(show_spinner=False)
 def get_loop():
     loop = asyncio.new_event_loop()
@@ -301,6 +327,7 @@ def bootstrap_agent(api_key: str):
         agent = GeminiWeatherAgent(api_key)
         st.session_state.agent = agent
         st.session_state.graph = build_langgraph(agent)
+
     return st.session_state.agent, loop, st.session_state.graph
 
 
@@ -308,10 +335,17 @@ def render_sidebar():
     st.sidebar.title("Weather MCP Agent")
     st.sidebar.success("Gemini key loaded")
     st.sidebar.caption(f"Model: {MODEL_NAME}")
+
     st.sidebar.subheader("Available Tools")
-    st.sidebar.markdown("- **get_current_weather** — Live weather for any city")
-    st.sidebar.markdown("- **get_forecast** — Up to 7-day daily forecast")
-    st.sidebar.markdown("- **compare_weather** — Side-by-side city comparison")
+    st.sidebar.markdown(
+        "- **get_current_weather** — Live weather for any city"
+    )
+    st.sidebar.markdown(
+        "- **get_forecast** — Up to 7-day daily forecast"
+    )
+    st.sidebar.markdown(
+        "- **compare_weather** — Side-by-side city comparison"
+    )
     st.sidebar.markdown("---")
     st.sidebar.caption("Weather data: Open-Meteo (free, no key needed)")
     st.sidebar.caption("LangGraph orchestrates the agent loop")
@@ -320,6 +354,7 @@ def render_sidebar():
 # ----------------------------------------------------------------
 # MAIN APP
 # ----------------------------------------------------------------
+
 def main():
     st.set_page_config(
         page_title="Weather MCP with Gemini",
@@ -345,7 +380,10 @@ def main():
         prompt = st.text_area(
             "Type your weather task below:",
             height=130,
-            value="Give me current weather in Chennai and a short practical summary.",
+            value=(
+                "Give me current weather in Chennai and "
+                "a short practical summary."
+            ),
         )
         run = st.button(
             "Run weather task",
@@ -402,12 +440,12 @@ def main():
     st.subheader("What this project gives you")
     st.markdown(
         """
-- **Gemini 2.0 Flash** function calling with weather tools
-- **LangGraph** agent node orchestrating the reasoning loop
-- **In-process weather tools** using Open-Meteo (free, no API key)
-- **Streamlit Cloud ready** — just add GEMINI_API_KEY in Secrets
+- **Gemini 2.5 Flash** function calling with weather tools  
+- **LangGraph** agent node orchestrating the reasoning loop  
+- **In-process weather tools** using Open-Meteo (free, no API key)  
+- **Streamlit Cloud ready** — just add GEMINI_API_KEY in Secrets  
 - Full **tool execution trace**
-    """
+        """
     )
 
 
