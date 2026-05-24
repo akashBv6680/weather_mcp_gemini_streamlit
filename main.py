@@ -9,20 +9,6 @@ from google import genai
 from google.genai import types
 from langgraph.graph import StateGraph, END
 
-# --- TTS imports (from your RAG app) ---
-import io
-import base64
-try:
-    import edge_tts
-except Exception:
-    edge_tts = None
-
-try:
-    from gtts import gTTS
-except Exception:
-    gTTS = None
-
-
 # ------------------------------------------------------------
 # CONFIG
 # ------------------------------------------------------------
@@ -31,6 +17,7 @@ SYSTEM_PROMPT = """
 You are a practical weather assistant in a Streamlit dashboard.
 Use the available weather tools whenever the user asks for
 live weather, forecast, rain chances, wind, or city comparisons.
+
 Always:
 - Call tools first when weather data is needed.
 - Ground your final answer in the tool results.
@@ -225,85 +212,6 @@ TOOL_DECLARATIONS = [
 
 
 # ------------------------------------------------------------
-# TTS UTILITIES (copied/adapted from Task4RAG-CAG)
-# ------------------------------------------------------------
-
-async def _edge_async(text: str, voice="en-US-AriaNeural", rate=None):
-    if not edge_tts:
-        return None
-    kwargs = {"text": text, "voice": voice}
-    if rate:
-        r = rate.strip()
-        if r == "0%" or r == "0":
-            r = "+0%"
-        elif not r.startswith(("+", "-")):
-            r = f"+{r}"
-        kwargs["rate"] = r
-    comm = edge_tts.Communicate(**kwargs)
-    out = io.BytesIO()
-    async for chunk in comm.stream():
-        if chunk[2]:
-            out.write(chunk[2])
-    return out.getvalue()
-
-
-def tts_edge(text: str, voice="en-US-AriaNeural", rate=None):
-    try:
-        return asyncio.run(_edge_async(text, voice, rate)), None
-    except Exception as e:
-        return None, str(e)
-
-
-def tts_gtts(text: str, lang="en"):
-    if not gTTS:
-        return None, "gTTS not available."
-    try:
-        buf = io.BytesIO()
-        gTTS(text, lang=lang).write_to_fp(buf)
-        return buf.getvalue(), None
-    except Exception as e:
-        return None, str(e)
-
-
-def synthesize(text: str, engine: str, lang_code="en"):
-    """Returns (audio_bytes, mime, error)"""
-    edge_voice_map = {
-        "en": "en-US-AriaNeural",
-        "hi": "hi-IN-SwaraNeural",
-        "ta": "ta-IN-PallaviNeural",
-        "bn": "bn-IN-BashkarNeural",
-        "es": "es-ES-AlvaroNeural",
-        "fr": "fr-FR-DeniseNeural",
-        "de": "de-DE-KatjaNeural",
-        "ar": "ar-SA-HamedNeural",
-        "zh-Hans": "zh-CN-XiaoxiaoNeural",
-        "zh-cn": "zh-CN-XiaoxiaoNeural",
-        "ja": "ja-JP-NanamiNeural",
-        "ko": "ko-KR-SunHiNeural",
-        "pt": "pt-PT-FernandaNeural",
-        "it": "it-IT-ElsaNeural",
-        "nl": "nl-NL-ColetteNeural",
-        "tr": "tr-TR-AhmetNeural",
-        "ru": "ru-RU-DariyaNeural",
-    }
-
-    if engine == "Edge-TTS":
-        voice = edge_voice_map.get(lang_code, "en-US-AriaNeural")
-        audio, err = tts_edge(text, voice=voice, rate="+0%")
-        if audio:
-            return audio, "audio/mp3", None
-        # fallback to gTTS
-        audio2, err2 = tts_gtts(text, lang=lang_code if lang_code else "en")
-        return audio2, "audio/mp3", err or err2
-
-    if engine == "gTTS":
-        audio, err = tts_gtts(text, lang=lang_code if lang_code else "en")
-        return audio, "audio/mp3", err
-
-    return None, None, "Unknown engine"
-
-
-# ------------------------------------------------------------
 # GEMINI AGENT
 # ------------------------------------------------------------
 
@@ -441,23 +349,6 @@ def render_sidebar():
     st.sidebar.caption("Weather data: Open-Meteo (free, no key needed)")
     st.sidebar.caption("LangGraph orchestrates the agent loop")
 
-    # Voice options
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("Response Options")
-    st.session_state.voice_mode = st.sidebar.checkbox("Enable voice reply", value=False)
-    st.session_state.tts_engine = st.sidebar.selectbox(
-        "TTS engine",
-        ["Edge-TTS", "gTTS"],
-        index=0,
-    )
-    # simple language code for TTS
-    st.session_state.tts_lang = st.sidebar.selectbox(
-        "Voice language",
-        ["en", "ta", "hi"],
-        index=0,
-        help="TTS language code (used for voice)",
-    )
-
 
 # ------------------------------------------------------------
 # MAIN STREAMLIT APP
@@ -474,7 +365,7 @@ def main():
     st.caption(
         "Gemini 2.5 Flash uses weather tools (Open-Meteo) via function calling. "
         "LangGraph coordinates the reasoning loop and tools. "
-        "Streamlit shows the final answer, tool execution trace, and optional voice reply."
+        "Streamlit shows the final answer and tool execution trace."
     )
 
     api_key = ensure_api_key()
@@ -524,23 +415,6 @@ def main():
             st.markdown("### Final Answer")
             st.write(result_state["answer"])
 
-            # Voice reply
-            if (
-                getattr(st.session_state, "voice_mode", False)
-                and result_state["answer"].strip()
-            ):
-                with st.spinner("Synthesizing voice reply..."):
-                    audio, mime, err = synthesize(
-                        result_state["answer"],
-                        st.session_state.tts_engine,
-                        st.session_state.tts_lang,
-                    )
-                if audio:
-                    st.markdown("#### Audio Reply")
-                    st.audio(io.BytesIO(audio), format=mime)
-                elif err:
-                    st.warning(f"Voice reply failed: {err}")
-
         with trace_box:
             st.markdown("### Tool Execution Trace")
             if not result_state["trace"]:
@@ -563,8 +437,7 @@ def main():
 - LangGraph agent orchestration in a single node  
 - Open-Meteo APIs for live weather and forecast (no key)  
 - Streamlit Cloud–friendly single-file deployment  
-- Full visibility into tool calls and results  
-- Optional voice reply using Edge-TTS or gTTS
+- Full visibility into tool calls and results
         """
     )
 
